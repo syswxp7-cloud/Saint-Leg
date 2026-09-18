@@ -10,8 +10,9 @@ local TweenService = game:GetService("TweenService")
 local CONFIG = {
 	PANEL_KEY = Enum.KeyCode.K,
 	SAINT_KEYWORD = "saint",
-	SAINT_COLOR = Color3.fromRGB(255, 200, 0),
-	PLAYER_COLOR = Color3.fromRGB(255, 40, 40),
+	SAINT_COLOR = Color3.fromRGB(0, 200, 255),   -- ESP da peça saint
+	PLAYER_COLOR = Color3.fromRGB(255, 40, 40),  -- jogadores normais
+	GOLD_COLOR = Color3.fromRGB(255, 215, 0),    -- jogador com a saint
 }
 
 local player = Players.LocalPlayer
@@ -39,9 +40,10 @@ end
 local function makeLabel(adornee, text, color, offset)
 	local billboard = Instance.new("BillboardGui")
 	billboard.Name = "ESP_Label"
-	billboard.Size = UDim2.fromOffset(160, 30)
+	billboard.Size = UDim2.fromOffset(220, 30)
 	billboard.StudsOffset = offset
 	billboard.AlwaysOnTop = true
+	billboard.MaxDistance = math.huge
 	billboard.Adornee = adornee
 	billboard.Parent = gui
 
@@ -65,8 +67,17 @@ local function distanceTo(part)
 	return math.floor((part.Position - cam.CFrame.Position).Magnitude)
 end
 
+local function isInsideCharacter(inst)
+	local m = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
+	while m do
+		if Players:GetPlayerFromCharacter(m) then return true end
+		m = m:FindFirstAncestorOfClass("Model")
+	end
+	return false
+end
+
 ----------------------------------------------------------------
---// FUNÇÃO 1: ESP SAINT
+--// FUNÇÃO 1: ESP SAINT (peça no mapa)
 ----------------------------------------------------------------
 local SaintESP = { Enabled = false }
 local saintTracked = {}   -- [inst] = {highlight, billboard, label, adornee}
@@ -75,6 +86,7 @@ local saintConns = {}
 local function saintMatches(inst)
 	return (inst:IsA("BasePart") or inst:IsA("Model"))
 		and inst.Name:lower():find(CONFIG.SAINT_KEYWORD, 1, true) ~= nil
+		and not isInsideCharacter(inst)
 end
 
 local function saintAdornee(inst)
@@ -127,7 +139,7 @@ function SaintESP.Enable()
 	table.insert(saintConns, workspace.DescendantRemoving:Connect(saintRemove))
 	table.insert(saintConns, RunService.RenderStepped:Connect(function()
 		for inst, d in pairs(saintTracked) do
-			if d.adornee and d.adornee.Parent then
+			if d.adornee and d.adornee:IsDescendantOf(workspace) and not isInsideCharacter(inst) then
 				d.label.Text = string.format("%s [%d]", inst.Name, distanceTo(d.adornee))
 			else
 				saintRemove(inst)
@@ -150,16 +162,39 @@ function SaintESP.Set(state)
 end
 
 ----------------------------------------------------------------
---// FUNÇÃO 2: ESP PLAYERS (nick em vermelho)
+--// FUNÇÃO 2: ESP PLAYERS (vermelho; dourado se estiver com a saint)
 ----------------------------------------------------------------
 local PlayerESP = { Enabled = false }
-local playerData = {}    -- [plr] = {highlight, billboard, label, head}
+local playerData = {}    -- [plr] = {char, head, highlight, billboard, label, hasSaint, conns}
 local playerConns = {}   -- [plr] = {conexões}
 local playerGlobalConns = {}
+
+local function charHasSaint(char)
+	for _, inst in ipairs(char:GetDescendants()) do
+		if inst.Name:lower():find(CONFIG.SAINT_KEYWORD, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function playerRefresh(plr)
+	local d = playerData[plr]
+	if not d or not d.char.Parent then return end
+
+	-- Attribute vem do servidor (pega até a saint guardada na mochila)
+	d.hasSaint = plr:GetAttribute("HasSaint") == true or charHasSaint(d.char)
+	local color = d.hasSaint and CONFIG.GOLD_COLOR or CONFIG.PLAYER_COLOR
+
+	d.highlight.FillColor = color
+	d.highlight.OutlineColor = color
+	d.label.TextColor3 = color
+end
 
 local function playerClear(plr)
 	local d = playerData[plr]
 	if not d then return end
+	for _, c in ipairs(d.conns) do c:Disconnect() end
 	if d.highlight then d.highlight:Destroy() end
 	if d.billboard then d.billboard:Destroy() end
 	playerData[plr] = nil
@@ -173,12 +208,25 @@ local function playerApply(plr, char)
 	if not head or not PlayerESP.Enabled or not char.Parent then return end
 
 	local billboard, label = makeLabel(head, plr.Name, CONFIG.PLAYER_COLOR, Vector3.new(0, 2.5, 0))
-	playerData[plr] = {
+	local d = {
+		char = char,
+		head = head,
 		highlight = makeHighlight(char, CONFIG.PLAYER_COLOR),
 		billboard = billboard,
 		label = label,
-		head = head,
+		hasSaint = false,
+		conns = {},
 	}
+	playerData[plr] = d
+
+	local function schedule()
+		task.defer(playerRefresh, plr)
+	end
+	table.insert(d.conns, char.DescendantAdded:Connect(schedule))
+	table.insert(d.conns, char.DescendantRemoving:Connect(schedule))
+	table.insert(d.conns, plr:GetAttributeChangedSignal("HasSaint"):Connect(schedule))
+
+	playerRefresh(plr)
 end
 
 local function playerWatch(plr)
@@ -221,7 +269,12 @@ function PlayerESP.Enable()
 	table.insert(playerGlobalConns, RunService.RenderStepped:Connect(function()
 		for plr, d in pairs(playerData) do
 			if d.head and d.head.Parent then
-				d.label.Text = string.format("%s [%d]", plr.Name, distanceTo(d.head))
+				d.label.Text = string.format(
+					"%s%s [%d]",
+					d.hasSaint and "[SAINT] " or "",
+					plr.Name,
+					distanceTo(d.head)
+				)
 			else
 				playerClear(plr)
 			end
